@@ -1,5 +1,5 @@
 'use client';
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef, useCallback } from 'react';
 
 type ClaimedPair = {
   assignmentId: string;
@@ -13,13 +13,16 @@ export default function PairsPage() {
   const [selectedSide, setSelectedSide] = useState<'left' | 'right' | null>(null);
   const [comparisonsCount, setComparisonsCount] = useState<number>(0);
   const [participantId, setParticipantId] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
+  const fetchingRef = useRef(false);
 
-  // Read participant identifier (response_id) from URL
+  // Read participant identifier from URL, then mark ready
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       const rid = params.get('response_id');
       setParticipantId(rid);
+      setReady(true);
     }
   }, []);
 
@@ -38,28 +41,33 @@ export default function PairsPage() {
 
   const canFetchMore = useMemo(() => comparisonsCount < 10, [comparisonsCount]);
 
-  const fetchPair = async () => {
-    if (!canFetchMore) return;
-    // Prefer POST so we can pass participant_id (optional)
-    const res = await fetch('/api/get-pair', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ participant_id: participantId ?? undefined }),
-    });
-    const data = await res.json();
-    if (data?.pair) {
-      setCurrentPair(data.pair as ClaimedPair);
-      setSelectedSide(null);
-    } else {
-      setCurrentPair(null);
+  const fetchPair = useCallback(async () => {
+    if (!canFetchMore || fetchingRef.current) return;
+    fetchingRef.current = true;
+    try {
+      const res = await fetch('/api/get-pair', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ participant_id: participantId ?? undefined }),
+      });
+      const data = await res.json();
+      if (data?.pair) {
+        setCurrentPair(data.pair as ClaimedPair);
+        setSelectedSide(null);
+      } else {
+        setCurrentPair(null);
+      }
+    } finally {
+      fetchingRef.current = false;
     }
-  };
+  }, [canFetchMore, participantId]);
 
+  // Fetch first pair only after URL params are read
   useEffect(() => {
-    // Kick off first claim after participantId is known (or immediately if null is fine)
-    fetchPair();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [participantId]);
+    if (ready) {
+      fetchPair();
+    }
+  }, [ready, fetchPair]);
 
   const handleSubmit = async () => {
     if (selectedSide == null || !currentPair) return;
@@ -69,22 +77,19 @@ export default function PairsPage() {
       body: JSON.stringify({
         assignmentId: currentPair.assignmentId,
         participantId: participantId ?? undefined,
-        choice: selectedSide, // 'left' | 'right'
-        // add optional telemetry here if needed:
-        // rt_ms, extra, etc.
+        choice: selectedSide,
       }),
     });
 
-    // Increment and fetch next if applicable
-    setComparisonsCount((prev) => prev + 1);
-    if (comparisonsCount + 1 < 10) {
+    const newCount = comparisonsCount + 1;
+    setComparisonsCount(newCount);
+    if (newCount < 10) {
       await fetchPair();
     } else {
       setCurrentPair(null);
     }
   };
 
-  // If we've reached 10 comparisons, show a thank-you message
   if (comparisonsCount >= 10) {
     return (
       <div style={{ maxWidth: '800px', margin: '40px auto', fontFamily: 'sans-serif', textAlign: 'center' }}>
@@ -95,16 +100,14 @@ export default function PairsPage() {
   }
 
   if (!currentPair) {
-    // This happens either when no pairs are available or after we've done 10
     if (comparisonsCount === 0) {
       return (
         <div style={{ maxWidth: '800px', margin: '40px auto', fontFamily: 'sans-serif', textAlign: 'center' }}>
           <h2>Loading...</h2>
-          <p>Please wait 5 seconds.</p>
+          <p>Please wait a moment.</p>
         </div>
       );
     } else {
-      // We've done some comparisons but no more pairs are available
       return (
         <div style={{ maxWidth: '800px', margin: '40px auto', fontFamily: 'sans-serif', textAlign: 'center' }}>
           <h2>Thank you for participating!</h2>
@@ -135,24 +138,24 @@ export default function PairsPage() {
     flexWrap: 'wrap',
   };
 
- const cardBaseStyle: React.CSSProperties = {
-  flex: '1 1 45%',
-  borderWidth: 1,
-  borderStyle: 'solid',
-  borderColor: '#ddd',
-  borderRadius: 8,
-  padding: 20,
-  cursor: 'pointer',
-  boxSizing: 'border-box',
-  background: '#fff',
-  transition: 'all 0.3s'
-};
+  const cardBaseStyle: React.CSSProperties = {
+    flex: '1 1 45%',
+    borderWidth: 1,
+    borderStyle: 'solid',
+    borderColor: '#ddd',
+    borderRadius: 8,
+    padding: 20,
+    cursor: 'pointer',
+    boxSizing: 'border-box',
+    background: '#fff',
+    transition: 'all 0.3s'
+  };
 
-const selectedCardStyle: React.CSSProperties = {
-  borderColor: '#0070f3',
-  boxShadow: '0 0 12px rgba(0,112,243,0.3)',
-  background: 'rgba(0,112,243,0.05)'
-};
+  const selectedCardStyle: React.CSSProperties = {
+    borderColor: '#0070f3',
+    boxShadow: '0 0 12px rgba(0,112,243,0.3)',
+    background: 'rgba(0,112,243,0.05)'
+  };
 
   const buttonStyle: React.CSSProperties = {
     display: 'block',
@@ -175,7 +178,7 @@ const selectedCardStyle: React.CSSProperties = {
   return (
     <div style={containerStyle}>
       <h2 style={headingStyle}>
-        Imagine you’re hiring someone to join your team. Which cover letter would make you more likely to offer an interview to the candidate? Choose one.
+        Imagine you're hiring someone to join your team. Which cover letter would make you more likely to offer an interview to the candidate? Choose one.
       </h2>
       <div style={comparisonContainerStyle}>
         <div
