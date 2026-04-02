@@ -10,7 +10,7 @@
   "dependencies": {
     "mongodb": "^6.12.0",
     "mongosh": "^2.3.7",
-    "next": "latest",
+    "next": "15.5.8",
     "react": "latest",
     "react-dom": "latest"
   },
