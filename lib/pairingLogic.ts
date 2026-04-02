@@ -4,6 +4,7 @@ import { ObjectId } from 'mongodb';
 import { loadPairs } from './dataStore';
 
 const COLLECTION = 'recruiter_pilot_comparisons';
+const RATINGS_PER_PAIR = 3;
 
 export async function getPairForUser(participantId?: string) {
   const client = await clientPromise;
@@ -20,9 +21,22 @@ export async function getPairForUser(participantId?: string) {
     { $set: { status: 'pending', participant_id: null, claimed_at: null, presented_order: null } }
   );
 
+  // Find pairIds this participant has already seen (to avoid duplicates)
+  const seenPairIds = participantId
+    ? (await comparisons.distinct('pairId', {
+        'result.participant_id': participantId,
+        status: 'completed'
+      }))
+    : [];
+
   const MAX_TRIES = 5;
   for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
-    const candidate = await comparisons.find({ status: 'pending' })
+    const filter: any = { status: 'pending' };
+    if (seenPairIds.length > 0) {
+      filter.pairId = { $nin: seenPairIds };
+    }
+
+    const candidate = await comparisons.find(filter)
       .sort({ seq: 1, _id: 1 })
       .limit(1)
       .toArray();
@@ -86,7 +100,6 @@ export async function submitResult({
   if (doc.status === 'completed') return true;
   if (doc.status !== 'assigned') return false;
 
-  // Map left/right to the winning essay ID (or 'tie')
   const winner =
     choice === 'tie'
       ? 'tie'
@@ -104,7 +117,7 @@ export async function submitResult({
         completed_at: new Date(),
         result: {
           participant_id: participantId ?? null,
-          normalized_winner: winner,  // essay ID of winner, or 'tie'
+          normalized_winner: winner,
           raw_choice: choice
         }
       }
@@ -120,25 +133,35 @@ async function seedPairsIfNeeded(db: any) {
   const pairs = loadPairs();
 
   const bulk = comparisons.initializeUnorderedBulkOp();
+  let ops = 0;
 
+  // Create RATINGS_PER_PAIR assignment slots per pair
   pairs.forEach((p, index) => {
-    bulk.find({ pairId: p.id }).upsert().updateOne({
-      $setOnInsert: {
-        pairId: p.id,
-        seq: index,
-        essay_a_id: p.essay_a_id,
-        essay_b_id: p.essay_b_id,
-        essay_a: p.essay_a,
-        essay_b: p.essay_b,
-        status: 'pending',
-        participant_id: null,
-        claimed_at: null,
-        completed_at: null,
-        presented_order: null,
-        created_at: new Date()
-      }
-    });
+    for (let rep = 0; rep < RATINGS_PER_PAIR; rep++) {
+      const slotId = `${p.id}_rep${rep}`;
+      bulk.find({ slotId }).upsert().updateOne({
+        $setOnInsert: {
+          slotId,
+          pairId: p.id,
+          rep,
+          seq: index,
+          essay_a_id: p.essay_a_id,
+          essay_b_id: p.essay_b_id,
+          essay_a: p.essay_a,
+          essay_b: p.essay_b,
+          status: 'pending',
+          participant_id: null,
+          claimed_at: null,
+          completed_at: null,
+          presented_order: null,
+          created_at: new Date()
+        }
+      });
+      ops++;
+    }
   });
+
+  if (ops === 0) return;
 
   try {
     await bulk.execute();
@@ -149,7 +172,8 @@ async function seedPairsIfNeeded(db: any) {
 
 // ---- Indexes ----
 async function ensureIndexes(comparisons: any) {
-  await comparisons.createIndex({ pairId: 1 }, { unique: true });
-  await comparisons.createIndex({ status: 1, seq: 1, _id: 1 });
+  await comparisons.createIndex({ slotId: 1 }, { unique: true });
+  await comparisons.createIndex({ status: 1, pairId: 1, seq: 1, _id: 1 });
   await comparisons.createIndex({ status: 1, claimed_at: 1 });
+  await comparisons.createIndex({ 'result.participant_id': 1, status: 1 });
 }
