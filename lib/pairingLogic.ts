@@ -6,20 +6,36 @@ import { loadPairs } from './dataStore';
 const COLLECTION = 'recruiter_pilot_comparisons';
 const RATINGS_PER_PAIR = 3;
 
+let initPromise: Promise<void> | null = null;
+let lastReclaimAt = 0;
+
+async function initOnce(db: any) {
+  const comparisons = db.collection(COLLECTION);
+  await ensureIndexes(comparisons);
+  await seedPairsIfNeeded(db);
+}
+
 export async function getPairForUser(participantId?: string) {
   const client = await clientPromise;
   const db = client.db(process.env.MONGODB_DB);
   const comparisons = db.collection(COLLECTION);
 
-  await ensureIndexes(comparisons);
-  await seedPairsIfNeeded(db);
+  // Index + seed once
+  if (!initPromise) {
+    initPromise = initOnce(db);
+  }
+  await initPromise;
 
-  // Reclaim stale assignments (tab closed, crash, etc.)
-  const RECLAIM_MS = 10 * 60 * 1000;
-  await comparisons.updateMany(
-    { status: 'assigned', claimed_at: { $lt: new Date(Date.now() - RECLAIM_MS) } },
-    { $set: { status: 'pending', participant_id: null, claimed_at: null, presented_order: null } }
-  );
+  // Reclaim stale assignments at most once per minute
+  const now = Date.now();
+  if (now - lastReclaimAt > 60_000) {
+    lastReclaimAt = now;
+    const RECLAIM_MS = 10 * 60 * 1000;
+    comparisons.updateMany(
+      { status: 'assigned', claimed_at: { $lt: new Date(now - RECLAIM_MS) } },
+      { $set: { status: 'pending', participant_id: null, claimed_at: null, presented_order: null } }
+    ); // fire-and-forget
+  }
 
   // Find pairIds this participant has already seen (to avoid duplicates)
   const seenPairIds = participantId
@@ -130,41 +146,39 @@ export async function submitResult({
 // ---- Seeding ----
 async function seedPairsIfNeeded(db: any) {
   const comparisons = db.collection(COLLECTION);
+
+  // Skip if already seeded
+  const count = await comparisons.countDocuments({}, { limit: 1 });
+  if (count > 0) return;
+
   const pairs = loadPairs();
+  const docs = [];
+  const now = new Date();
 
-  const bulk = comparisons.initializeUnorderedBulkOp();
-  let ops = 0;
-
-  // Create RATINGS_PER_PAIR assignment slots per pair
-  pairs.forEach((p, index) => {
-    for (let rep = 0; rep < RATINGS_PER_PAIR; rep++) {
-      const slotId = `${p.id}_rep${rep}`;
-      bulk.find({ slotId }).upsert().updateOne({
-        $setOnInsert: {
-          slotId,
-          pairId: p.id,
-          rep,
-          seq: index + rep * pairs.length,  // rep0: 0-899, rep1: 900-1799, rep2: 1800-2699
-          essay_a_id: p.essay_a_id,
-          essay_b_id: p.essay_b_id,
-          essay_a: p.essay_a,
-          essay_b: p.essay_b,
-          status: 'pending',
-          participant_id: null,
-          claimed_at: null,
-          completed_at: null,
-          presented_order: null,
-          created_at: new Date()
-        }
+  for (let rep = 0; rep < RATINGS_PER_PAIR; rep++) {
+    for (let index = 0; index < pairs.length; index++) {
+      const p = pairs[index];
+      docs.push({
+        slotId: `${p.id}_rep${rep}`,
+        pairId: p.id,
+        rep,
+        seq: index + rep * pairs.length,
+        essay_a_id: p.essay_a_id,
+        essay_b_id: p.essay_b_id,
+        essay_a: p.essay_a,
+        essay_b: p.essay_b,
+        status: 'pending',
+        participant_id: null,
+        claimed_at: null,
+        completed_at: null,
+        presented_order: null,
+        created_at: now
       });
-      ops++;
     }
-  });
-
-  if (ops === 0) return;
+  }
 
   try {
-    await bulk.execute();
+    await comparisons.insertMany(docs, { ordered: false });
   } catch (e: any) {
     if (e.code !== 11000) throw e;
   }
