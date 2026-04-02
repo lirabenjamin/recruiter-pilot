@@ -144,7 +144,7 @@ async function seedPairsIfNeeded(db: any) {
           slotId,
           pairId: p.id,
           rep,
-          seq: index,
+          seq: index + rep * pairs.length,  // rep0: 0-899, rep1: 900-1799, rep2: 1800-2699
           essay_a_id: p.essay_a_id,
           essay_b_id: p.essay_b_id,
           essay_a: p.essay_a,
