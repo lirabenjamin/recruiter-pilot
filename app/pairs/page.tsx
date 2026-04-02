@@ -1,5 +1,5 @@
 'use client';
-import React, { useEffect, useState, useMemo, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 
 type ClaimedPair = {
   assignmentId: string;
@@ -13,17 +13,31 @@ export default function PairsPage() {
   const [selectedSide, setSelectedSide] = useState<'left' | 'right' | null>(null);
   const [comparisonsCount, setComparisonsCount] = useState<number>(0);
   const [participantId, setParticipantId] = useState<string | null>(null);
-  const [ready, setReady] = useState(false);
-  const fetchingRef = useRef(false);
+  const hasFetchedRef = useRef(false);
+  const participantIdRef = useRef<string | null>(null);
 
-  // Read participant identifier from URL, then mark ready
+  // Read participant identifier from URL + fetch first pair (once only)
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      const rid = params.get('response_id');
-      setParticipantId(rid);
-      setReady(true);
-    }
+    if (hasFetchedRef.current) return;
+    hasFetchedRef.current = true;
+
+    const params = new URLSearchParams(window.location.search);
+    const rid = params.get('response_id');
+    setParticipantId(rid);
+    participantIdRef.current = rid;
+
+    // Fetch first pair immediately
+    fetch('/api/get-pair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ participant_id: rid ?? undefined }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data?.pair) {
+          setCurrentPair(data.pair as ClaimedPair);
+        }
+      });
   }, []);
 
   // Notify Qualtrics parent when we've hit 10 comparisons
@@ -39,35 +53,20 @@ export default function PairsPage() {
     }
   }, [comparisonsCount]);
 
-  const canFetchMore = useMemo(() => comparisonsCount < 10, [comparisonsCount]);
-
-  const fetchPair = useCallback(async () => {
-    if (!canFetchMore || fetchingRef.current) return;
-    fetchingRef.current = true;
-    try {
-      const res = await fetch('/api/get-pair', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ participant_id: participantId ?? undefined }),
-      });
-      const data = await res.json();
-      if (data?.pair) {
-        setCurrentPair(data.pair as ClaimedPair);
-        setSelectedSide(null);
-      } else {
-        setCurrentPair(null);
-      }
-    } finally {
-      fetchingRef.current = false;
+  const fetchNextPair = async () => {
+    const res = await fetch('/api/get-pair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ participant_id: participantIdRef.current ?? undefined }),
+    });
+    const data = await res.json();
+    if (data?.pair) {
+      setCurrentPair(data.pair as ClaimedPair);
+      setSelectedSide(null);
+    } else {
+      setCurrentPair(null);
     }
-  }, [canFetchMore, participantId]);
-
-  // Fetch first pair only after URL params are read
-  useEffect(() => {
-    if (ready) {
-      fetchPair();
-    }
-  }, [ready, fetchPair]);
+  };
 
   const handleSubmit = async () => {
     if (selectedSide == null || !currentPair) return;
@@ -84,7 +83,7 @@ export default function PairsPage() {
     const newCount = comparisonsCount + 1;
     setComparisonsCount(newCount);
     if (newCount < 10) {
-      await fetchPair();
+      await fetchNextPair();
     } else {
       setCurrentPair(null);
     }
